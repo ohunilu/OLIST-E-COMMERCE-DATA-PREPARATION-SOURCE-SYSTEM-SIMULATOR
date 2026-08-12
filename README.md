@@ -1,0 +1,2 @@
+# OLIST-E-COMMERCE-DATA-PREPARATION-SOURCE-SYSTEM-SIMULATOR
+This project creates a realistic simulated e-commerce operational source system from the public Brazilian E-Commerce Dataset by Olist.  The project prepares and publishes high-quality operational e-commerce data into PostgreSQL, which will subsequently serve as the upstream production-like source system for any business intelligence project..
