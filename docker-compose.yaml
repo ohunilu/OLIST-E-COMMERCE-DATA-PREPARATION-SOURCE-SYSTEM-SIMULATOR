@@ -1,0 +1,69 @@
+services:
+
+  preparation:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: olist_preparation
+
+    env_file:
+      - .env
+
+    volumes:
+      - ./source_data:/app/source_data:ro
+      - ./simulated_data:/app/simulated_data
+      - ./src:/app/src
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    networks:
+      - olist_network
+
+    working_dir: /app
+
+    command: tail -f /dev/null
+
+
+  postgres:
+    image: postgres:16
+
+    container_name: olist_postgres
+
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+    ports:
+      - "${POSTGRES_PORT}:5432"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+    networks:
+      - olist_network
+
+
+networks:
+  olist_network:
+    driver: bridge
+
+
+volumes:
+  postgres_data:

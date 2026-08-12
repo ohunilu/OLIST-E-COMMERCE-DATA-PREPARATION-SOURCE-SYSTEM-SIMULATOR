@@ -4,7 +4,13 @@ __pycache__/
 
 
 # Local Olist raw files
-olist_raw_data/*.csv
+source_data/*.csv
+
+# PostgreSQL
+postgres_data/*
+
+# Local/generated data
+simulated_data/*.csv
 
 # Environment
 .env
