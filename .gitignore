@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+
+
+# Local Olist raw files
+source_data/*.csv
+
+# PostgreSQL
+postgres_data/*
+
+# Local/generated data
+simulated_data/*.csv
+
+# Environment
+.env
+
+# VS Code
+.vscode/
+
+# macOS/Linux
+.DS_Store
