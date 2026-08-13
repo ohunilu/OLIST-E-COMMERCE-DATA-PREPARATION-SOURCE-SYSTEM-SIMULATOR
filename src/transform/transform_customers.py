@@ -197,7 +197,7 @@ def transform_customers(df: pd.DataFrame) -> pd.DataFrame:
         .str.upper()
     )
 
-    output["postal_code"] = (
+    output["zip_code_prefix"] = (
         df["customer_zip_code_prefix"]
         .astype("string")
         .str.zfill(5)
@@ -212,12 +212,6 @@ def transform_customers(df: pd.DataFrame) -> pd.DataFrame:
     # Olist does not contain a customer signup timestamp.
     # This will be populated later using the customer's earliest order.
     output["signup_date"] = pd.NaT
-
-    # These are operational metadata fields. We will establish the actual
-    # simulation clock when the full source-system preparation pipeline
-    # is implemented.
-    output["created_at"] = pd.NaT
-    output["updated_at"] = pd.NaT
 
     return output
 
@@ -239,11 +233,9 @@ def validate_output(df: pd.DataFrame) -> None:
         "address_line_1",
         "city",
         "state",
-        "postal_code",
+        "zip_code_prefix",
         "country",
         "signup_date",
-        "created_at",
-        "updated_at",
     ]
 
     if list(df.columns) != expected_columns:
@@ -278,7 +270,7 @@ def validate_output(df: pd.DataFrame) -> None:
             "Expected two-character Brazilian state codes."
         )
 
-    if not (df["postal_code"].str.len() == 5).all():
+    if not (df["zip_code_prefix"].str.len() == 5).all():
         raise ValueError(
             "Postal code validation failed. "
             "Expected five-character postal codes."
