@@ -28,35 +28,29 @@ from pathlib import Path
 
 import pandas as pd
 
-
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-SOURCE_FILE = Path(
-    "/app/source_data/olist_sellers_dataset.csv"
+from seller_util.seller_config import (
+    OUTPUT_FILE,
+    SOURCE_FILE,
+)
+from seller_util.seller_io import (
+    read_source_data as _read_source_data,
+    validate_file_exists as _validate_file_exists,
+    write_output as _write_output,
+)
+from seller_util.seller_transform import (
+    standardize_text_fields as _standardize_text_fields,
+    transform_sellers as _transform_sellers,
+)
+from seller_util.seller_validation import (
+    validate_numeric_values as _validate_numeric_values,
+    validate_output as _validate_output,
+    validate_required_fields as _validate_required_fields,
+    validate_seller_keys as _validate_seller_keys,
+    validate_source_schema as _validate_source_schema,
+    validate_state_values as _validate_state_values,
 )
 
-OUTPUT_FILE = Path(
-    "/app/simulated_data/sellers.csv"
-)
-
-
-EXPECTED_COLUMNS = [
-    "seller_id",
-    "seller_zip_code_prefix",
-    "seller_city",
-    "seller_state",
-]
-
-
-VALID_STATE_LENGTH = 2
-
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-
+# Logging Configuration
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -65,380 +59,85 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
 # File validation
-# ---------------------------------------------------------------------------
-
 def validate_file_exists(
     path: Path,
     description: str,
 ) -> None:
-    """Validate that an input file exists."""
+    _validate_file_exists(path, description)
 
-    if not path.exists():
-        raise FileNotFoundError(
-            f"{description} not found: {path}"
-        )
-
-
-# ---------------------------------------------------------------------------
 # Schema validation
-# ---------------------------------------------------------------------------
+def validate_source_schema(df: pd.DataFrame) -> None:
+    _validate_source_schema(df)
 
-def validate_source_schema(
-    df: pd.DataFrame,
-) -> None:
-    """Validate the seller source schema."""
-
-    actual_columns = list(df.columns)
-
-    if actual_columns != EXPECTED_COLUMNS:
-        raise ValueError(
-            "Unexpected seller source schema.\n"
-            f"Expected: {EXPECTED_COLUMNS}\n"
-            f"Actual:   {actual_columns}"
-        )
-
-    logger.info(
-        "Source schema validation passed."
-    )
-
-
-# ---------------------------------------------------------------------------
 # Seller key validation
-# ---------------------------------------------------------------------------
+def validate_seller_keys(df: pd.DataFrame) -> None:
+    _validate_seller_keys(df)
 
-def validate_seller_keys(
-    df: pd.DataFrame,
-) -> None:
-    """Validate seller_id as the primary key."""
-
-    if df["seller_id"].isna().any():
-        raise ValueError(
-            "seller_id contains NULL values."
-        )
-
-    duplicate_count = (
-        df["seller_id"]
-        .duplicated()
-        .sum()
-    )
-
-    if duplicate_count > 0:
-        raise ValueError(
-            "Duplicate seller_id values detected: "
-            f"{duplicate_count}"
-        )
-
-    logger.info(
-        "Seller key validation passed."
-    )
-
-
-# ---------------------------------------------------------------------------
 # Required field validation
-# ---------------------------------------------------------------------------
+def validate_required_fields(df: pd.DataFrame) -> None:
+    _validate_required_fields(df)
 
-def validate_required_fields(
-    df: pd.DataFrame,
-) -> None:
-    """Validate required seller attributes."""
-
-    required_columns = EXPECTED_COLUMNS
-
-    null_counts = (
-        df[required_columns]
-        .isna()
-        .sum()
-    )
-
-    invalid = null_counts[
-        null_counts > 0
-    ]
-
-    if not invalid.empty:
-        raise ValueError(
-            "Required seller fields contain NULL values:\n"
-            f"{invalid.to_string()}"
-        )
-
-    logger.info(
-        "Required field validation passed."
-    )
-
-
-# ---------------------------------------------------------------------------
 # Text standardization
-# ---------------------------------------------------------------------------
+def standardize_text_fields(df: pd.DataFrame) -> pd.DataFrame:
+    return _standardize_text_fields(df)
 
-def standardize_text_fields(
-    df: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    Standardize textual seller attributes.
-
-    This deliberately performs only conservative formatting:
-        - trim leading/trailing whitespace
-        - convert state to uppercase
-
-    City names are retained in the source's lowercase representation.
-    """
-
-    df["seller_id"] = (
-        df["seller_id"]
-        .astype(str)
-        .str.strip()
-    )
-
-    df["seller_city"] = (
-        df["seller_city"]
-        .astype(str)
-        .str.strip()
-    )
-
-    df["seller_state"] = (
-        df["seller_state"]
-        .astype(str)
-        .str.strip()
-        .str.upper()
-    )
-
-    logger.info(
-        "Seller text standardization completed."
-    )
-
-    return df
-
-
-# ---------------------------------------------------------------------------
 # Numeric validation
-# ---------------------------------------------------------------------------
+def validate_numeric_values(df: pd.DataFrame) -> None:
+    _validate_numeric_values(df)
 
-def validate_numeric_values(
-    df: pd.DataFrame,
-) -> None:
-    """Validate seller numeric attributes."""
-
-    if (
-        df["seller_zip_code_prefix"] < 0
-    ).any():
-        invalid_count = (
-            df["seller_zip_code_prefix"] < 0
-        ).sum()
-
-        raise ValueError(
-            "Negative seller ZIP code prefixes detected: "
-            f"{invalid_count}"
-        )
-
-    logger.info(
-        "Numeric value validation passed."
-    )
-
-
-# ---------------------------------------------------------------------------
 # State validation
-# ---------------------------------------------------------------------------
+def validate_state_values(df: pd.DataFrame) -> None:
+    _validate_state_values(df)
 
-def validate_state_values(
-    df: pd.DataFrame,
-) -> None:
-    """Validate Brazilian state/UF codes."""
-
-    invalid_length = (
-        df["seller_state"]
-        .str.len()
-        .ne(VALID_STATE_LENGTH)
-    )
-
-    if invalid_length.any():
-        invalid_count = invalid_length.sum()
-
-        raise ValueError(
-            "Invalid seller_state length detected: "
-            f"{invalid_count}"
-        )
-
-    invalid_values = sorted(
-        df.loc[
-            ~df["seller_state"].str.match(
-                r"^[A-Z]{2}$"
-            ),
-            "seller_state",
-        ].unique()
-    )
-
-    if invalid_values:
-        raise ValueError(
-            "Invalid seller_state values detected: "
-            f"{invalid_values}"
-        )
-
-    logger.info(
-        "Seller state validation passed."
-    )
-
-
-# ---------------------------------------------------------------------------
 # Output validation
-# ---------------------------------------------------------------------------
-
 def validate_output(
     df: pd.DataFrame,
     source_record_count: int,
 ) -> None:
-    """Validate the final transformed seller dataset."""
+    _validate_output(df, source_record_count)
 
-    if len(df) != source_record_count:
-        raise ValueError(
-            "Output row count changed.\n"
-            f"Source: {source_record_count}\n"
-            f"Output: {len(df)}"
-        )
-
-    logger.info(
-        "Output row-count validation passed: %s records.",
-        f"{len(df):,}",
-    )
-
-    if list(df.columns) != EXPECTED_COLUMNS:
-        raise ValueError(
-            "Output schema does not match expected schema.\n"
-            f"Expected: {EXPECTED_COLUMNS}\n"
-            f"Actual:   {list(df.columns)}"
-        )
-
-    duplicate_count = (
-        df["seller_id"]
-        .duplicated()
-        .sum()
-    )
-
-    if duplicate_count > 0:
-        raise ValueError(
-            "Output contains duplicate seller_id values: "
-            f"{duplicate_count}"
-        )
-
-    if df[EXPECTED_COLUMNS].isna().any().any():
-        raise ValueError(
-            "Output contains unexpected NULL values."
-        )
-
-    logger.info(
-        "Output seller key validation passed."
-    )
-
-    logger.info(
-        "Output schema validation passed."
-    )
-
-
-# ---------------------------------------------------------------------------
 # Main transformation
-# ---------------------------------------------------------------------------
+def transform_sellers(df: pd.DataFrame) -> pd.DataFrame:
+    return _transform_sellers(df)
+
 
 def main() -> None:
-    """Execute the complete seller transformation."""
-
-    logger.info(
-        "Starting Olist sellers dataset transformation."
-    )
-
-    # -----------------------------------------------------------------------
-    # Validate input
-    # -----------------------------------------------------------------------
+    logger.info("Starting Olist sellers dataset transformation.")
 
     validate_file_exists(
         SOURCE_FILE,
         "Seller source file",
     )
 
-    # -----------------------------------------------------------------------
-    # Read source
-    # -----------------------------------------------------------------------
+    logger.info("Reading source file: %s", SOURCE_FILE)
 
-    logger.info(
-        "Reading source file: %s",
-        SOURCE_FILE,
-    )
-
-    sellers_df = pd.read_csv(
-        SOURCE_FILE
-    )
-
-    source_record_count = len(
-        sellers_df
-    )
+    sellers_df = _read_source_data()
+    source_record_count = len(sellers_df)
 
     logger.info(
         "Source records loaded: %s",
         f"{source_record_count:,}",
     )
 
-    # -----------------------------------------------------------------------
-    # Source validation
-    # -----------------------------------------------------------------------
+    validate_source_schema(sellers_df)
+    validate_seller_keys(sellers_df)
+    validate_required_fields(sellers_df)
+    validate_numeric_values(sellers_df)
 
-    validate_source_schema(
-        sellers_df
-    )
-
-    validate_seller_keys(
-        sellers_df
-    )
-
-    validate_required_fields(
-        sellers_df
-    )
-
-    validate_numeric_values(
-        sellers_df
-    )
-
-    # -----------------------------------------------------------------------
-    # Standardization
-    # -----------------------------------------------------------------------
-
-    sellers_df = standardize_text_fields(
-        sellers_df
-    )
-
-    validate_state_values(
-        sellers_df
-    )
-
-    # -----------------------------------------------------------------------
-    # Output validation
-    # -----------------------------------------------------------------------
+    sellers_df = standardize_text_fields(sellers_df)
+    validate_state_values(sellers_df)
 
     validate_output(
         sellers_df,
         source_record_count,
     )
 
-    # -----------------------------------------------------------------------
-    # Write output
-    # -----------------------------------------------------------------------
+    _write_output(sellers_df)
 
-    OUTPUT_FILE.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    logger.info("Output file written: %s", OUTPUT_FILE)
 
-    sellers_df.to_csv(
-        OUTPUT_FILE,
-        index=False,
-    )
-
-    logger.info(
-        "Output file written: %s",
-        OUTPUT_FILE,
-    )
-
-    logger.info(
-        "Seller transformation completed successfully."
-    )
+    logger.info("Seller transformation completed successfully.")
 
     logger.info(
         "Source records: %s",
