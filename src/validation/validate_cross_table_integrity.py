@@ -1,28 +1,18 @@
 """
-Cross-table integrity validation for the Olist prepared datasets.
+Cross-table integrity validation for the Olist source-system simulator.
 
-This module validates referential integrity, key uniqueness, row-count
-expectations, and important cross-table relationships across the
-transformed Olist datasets.
+Validates referential integrity and business relationships across the
+transformed datasets.
 
-The validator is intentionally read-only. It does not modify any
-prepared dataset.
-
-Expected prepared datasets:
-
-    customers.csv
-    orders.csv
-    order_items.csv
-    products.csv
-    payments.csv
-    sellers.csv
-    reviews.csv
-    geolocation.csv
-
-Usage:
-
-    docker compose exec preparation \
-        python src/validate/validate_cross_table_integrity.py
+Tables:
+    customers
+    orders
+    order_items
+    products
+    payments
+    sellers
+    reviews
+    geolocation
 """
 
 from __future__ import annotations
@@ -30,807 +20,557 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
-from typing import Iterable
 
 import pandas as pd
 
+from cross_table_util.cross_table_config import LOG_FORMAT
+from cross_table_util.cross_table_io import load_all_tables
+from cross_table_util.cross_table_validation import (
+    normalize_zip_codes,
+    validate_customer_zip_coverage,
+    validate_foreign_key,
+    validate_required_columns,
+    validate_unique_key,
+)
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-BASE_DIR = Path("/app")
-SIMULATED_DATA_DIR = BASE_DIR / "simulated_data"
-
-FILES = {
-    "customers": SIMULATED_DATA_DIR / "customers.csv",
-    "orders": SIMULATED_DATA_DIR / "orders.csv",
-    "order_items": SIMULATED_DATA_DIR / "order_items.csv",
-    "products": SIMULATED_DATA_DIR / "products.csv",
-    "payments": SIMULATED_DATA_DIR / "payments.csv",
-    "sellers": SIMULATED_DATA_DIR / "sellers.csv",
-    "reviews": SIMULATED_DATA_DIR / "reviews.csv",
-    "geolocation": SIMULATED_DATA_DIR / "geolocation.csv",
-}
-
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-
+# Logging Configuration
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
+    format=LOG_FORMAT,
 )
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Exceptions
-# ---------------------------------------------------------------------------
-
-
-class CrossTableValidationError(Exception):
-    """Raised when cross-table integrity validation fails."""
-
-
-# ---------------------------------------------------------------------------
 # Utility functions
-# ---------------------------------------------------------------------------
-
-
-def load_dataset(name: str, path: Path) -> pd.DataFrame:
-    """Load a prepared dataset and validate that the file exists."""
-
-    if not path.exists():
-        raise CrossTableValidationError(
-            f"Required dataset not found: {path}"
-        )
-
-    logger.info("Reading %s: %s", name, path)
-
-    df = pd.read_csv(path)
-
-    logger.info(
-        "%s records loaded: %s",
-        name.capitalize(),
-        f"{len(df):,}",
-    )
-
-    return df
+def load_table(path: Path, table_name: str) -> pd.DataFrame:
+    """Load a transformed CSV table."""
+    return load_all_tables()[table_name]
 
 
 def validate_required_columns(
-    name: str,
-    df: pd.DataFrame,
-    required_columns: Iterable[str],
+    dataframe: pd.DataFrame,
+    required_columns: list[str],
+    table_name: str,
 ) -> None:
-    """Validate that all required columns exist."""
+    """Validate required columns."""
+    _validate_required_columns = __import__(
+        "cross_table_util.cross_table_validation",
+        fromlist=["validate_required_columns"],
+    ).validate_required_columns
 
-    missing = [
-        column
-        for column in required_columns
-        if column not in df.columns
-    ]
-
-    if missing:
-        raise CrossTableValidationError(
-            f"{name} is missing required columns: {missing}"
-        )
-
-    logger.info(
-        "%s required-column validation passed.",
-        name.capitalize(),
+    _validate_required_columns(
+        dataframe,
+        required_columns,
+        table_name,
     )
 
 
 def validate_unique_key(
-    name: str,
-    df: pd.DataFrame,
+    dataframe: pd.DataFrame,
     columns: list[str],
+    table_name: str,
 ) -> None:
-    """Validate uniqueness of a business key."""
+    """Validate uniqueness of a single or composite key."""
+    _validate_unique_key = __import__(
+        "cross_table_util.cross_table_validation",
+        fromlist=["validate_unique_key"],
+    ).validate_unique_key
 
-    duplicate_count = df.duplicated(columns).sum()
-
-    if duplicate_count > 0:
-        raise CrossTableValidationError(
-            f"{name} key validation failed: "
-            f"{duplicate_count:,} duplicate records found "
-            f"for key {columns}."
-        )
-
-    logger.info(
-        "%s unique-key validation passed: %s.",
-        name.capitalize(),
-        " + ".join(columns),
+    _validate_unique_key(
+        dataframe,
+        columns,
+        table_name,
     )
-
-
-def validate_no_nulls(
-    name: str,
-    df: pd.DataFrame,
-    columns: Iterable[str],
-) -> None:
-    """Validate that key columns do not contain NULL values."""
-
-    null_counts = df[list(columns)].isna().sum()
-
-    failures = {
-        column: int(count)
-        for column, count in null_counts.items()
-        if count > 0
-    }
-
-    if failures:
-        raise CrossTableValidationError(
-            f"{name} contains NULL values in key columns: {failures}"
-        )
-
-    logger.info(
-        "%s key NULL validation passed.",
-        name.capitalize(),
-    )
-
 
 def validate_foreign_key(
-    child_name: str,
-    child_df: pd.DataFrame,
+    child: pd.DataFrame,
     child_column: str,
-    parent_name: str,
-    parent_df: pd.DataFrame,
+    parent: pd.DataFrame,
     parent_column: str,
-) -> int:
-    """
-    Validate that every non-null child foreign key exists in the parent.
-
-    Returns:
-        Number of orphan records.
-    """
-
-    child_values = child_df[child_column].dropna()
-    parent_values = parent_df[parent_column].dropna()
-
-    orphan_mask = ~child_values.isin(parent_values)
-    orphan_count = int(orphan_mask.sum())
-
-    if orphan_count > 0:
-        orphan_values = (
-            child_values[orphan_mask]
-            .drop_duplicates()
-            .head(10)
-            .tolist()
-        )
-
-        raise CrossTableValidationError(
-            f"Referential integrity failed: "
-            f"{child_name}.{child_column} contains "
-            f"{orphan_count:,} orphan records referencing "
-            f"{parent_name}.{parent_column}. "
-            f"Sample orphan values: {orphan_values}"
-        )
-
-    logger.info(
-        "Referential integrity passed: "
-        "%s.%s -> %s.%s",
-        child_name,
-        child_column,
-        parent_name,
-        parent_column,
-    )
-
-    return orphan_count
-
-
-def validate_optional_foreign_key(
-    child_name: str,
-    child_df: pd.DataFrame,
-    child_column: str,
-    parent_name: str,
-    parent_df: pd.DataFrame,
-    parent_column: str,
+    relationship_name: str,
 ) -> None:
-    """
-    Validate a foreign-key relationship but report orphan values as a
-    warning rather than failing the complete validation.
+    """Validate child-to-parent relationship."""
+    _validate_foreign_key = __import__(
+        "cross_table_util.cross_table_validation",
+        fromlist=["validate_foreign_key"],
+    ).validate_foreign_key
 
-    This is appropriate for source-system geographic relationships,
-    where a source ZIP prefix may not have a corresponding geolocation
-    observation.
-    """
-
-    child_values = child_df[child_column].dropna()
-    parent_values = parent_df[parent_column].dropna()
-
-    orphan_mask = ~child_values.isin(parent_values)
-    orphan_count = int(orphan_mask.sum())
-
-    if orphan_count > 0:
-        orphan_values = (
-            child_values[orphan_mask]
-            .drop_duplicates()
-            .head(10)
-            .tolist()
-        )
-
-        logger.warning(
-            "Geographic reference anomaly: "
-            "%s.%s contains %s records whose value does not "
-            "exist in %s.%s. Sample values: %s",
-            child_name,
-            child_column,
-            f"{orphan_count:,}",
-            parent_name,
-            parent_column,
-            orphan_values,
-        )
-
-        return
-
-    logger.info(
-        "Geographic referential integrity passed: "
-        "%s.%s -> %s.%s",
-        child_name,
+    _validate_foreign_key(
+        child,
         child_column,
-        parent_name,
+        parent,
         parent_column,
+        relationship_name,
     )
 
 
-def validate_row_count(
-    name: str,
-    df: pd.DataFrame,
-    expected_minimum: int = 1,
-) -> None:
-    """Validate that a prepared dataset is not unexpectedly empty."""
+def normalize_zip_codes(series: pd.Series) -> pd.Series:
+    """Normalize ZIP-code prefixes."""
+    return __import__(
+        "cross_table_util.cross_table_validation",
+        fromlist=["normalize_zip_codes"],
+    ).normalize_zip_codes(series)
 
-    if len(df) < expected_minimum:
-        raise CrossTableValidationError(
-            f"{name} contains only {len(df):,} records."
-        )
 
+# Main validation
+def main() -> None:
+    logger.info("=" * 60)
     logger.info(
-        "%s row-count validation passed: %s records.",
-        name.capitalize(),
-        f"{len(df):,}",
+        "Starting Olist cross-table integrity validation."
+    )
+    logger.info("=" * 60)
+
+    tables = load_all_tables()
+
+    customers = tables["customers"]
+    orders = tables["orders"]
+    order_items = tables["order_items"]
+    products = tables["products"]
+    payments = tables["payments"]
+    sellers = tables["sellers"]
+    reviews = tables["reviews"]
+    geolocation = tables["geolocation"]
+
+    # Schema validation
+    validate_required_columns(
+        customers,
+        [
+            "customer_id",
+            "customer_unique_id",
+            "zip_code_prefix",
+            "signup_date",
+        ],
+        "customers",
     )
 
-
-# ---------------------------------------------------------------------------
-# Dataset-level validation
-# ---------------------------------------------------------------------------
-
-
-def validate_dataset_keys(datasets: dict[str, pd.DataFrame]) -> None:
-    """Validate primary and composite keys for all prepared datasets."""
-
-    validate_unique_key(
-        "Customers",
-        datasets["customers"],
-        ["customer_id"],
+    validate_required_columns(
+        orders,
+        [
+            "order_id",
+            "customer_id",
+            "order_purchase_timestamp",
+        ],
+        "orders",
     )
 
-    validate_unique_key(
-        "Orders",
-        datasets["orders"],
-        ["order_id"],
-    )
-
-    validate_unique_key(
-        "Order items",
-        datasets["order_items"],
-        ["order_id", "order_item_id"],
-    )
-
-    validate_unique_key(
-        "Products",
-        datasets["products"],
-        ["product_id"],
-    )
-
-    validate_unique_key(
-        "Payments",
-        datasets["payments"],
-        ["order_id", "payment_sequential"],
-    )
-
-    validate_unique_key(
-        "Sellers",
-        datasets["sellers"],
-        ["seller_id"],
-    )
-
-    validate_unique_key(
-        "Reviews",
-        datasets["reviews"],
-        ["review_id", "order_id"],
-    )
-
-
-def validate_key_nulls(datasets: dict[str, pd.DataFrame]) -> None:
-    """Validate NULL-free relationship keys."""
-
-    validate_no_nulls(
-        "Customers",
-        datasets["customers"],
-        ["customer_id"],
-    )
-
-    validate_no_nulls(
-        "Orders",
-        datasets["orders"],
-        ["order_id", "customer_id"],
-    )
-
-    validate_no_nulls(
-        "Order items",
-        datasets["order_items"],
+    validate_required_columns(
+        order_items,
         [
             "order_id",
             "order_item_id",
             "product_id",
             "seller_id",
         ],
+        "order_items",
     )
 
-    validate_no_nulls(
-        "Products",
-        datasets["products"],
+    validate_required_columns(
+        products,
+        [
+            "product_id",
+        ],
+        "products",
+    )
+
+    validate_required_columns(
+        payments,
+        [
+            "order_id",
+            "payment_sequential",
+        ],
+        "payments",
+    )
+
+    validate_required_columns(
+        sellers,
+        [
+            "seller_id",
+        ],
+        "sellers",
+    )
+
+    validate_required_columns(
+        reviews,
+        [
+            "review_id",
+            "order_id",
+            "review_score",
+        ],
+        "reviews",
+    )
+
+    validate_required_columns(
+        geolocation,
+        [
+            "geolocation_zip_code_prefix",
+            "geolocation_lat",
+            "geolocation_lng",
+        ],
+        "geolocation",
+    )
+
+    logger.info("All table schema validations passed.")
+
+    # Primary / composite key validation
+    validate_unique_key(
+        customers,
+        ["customer_id"],
+        "customers",
+    )
+
+    validate_unique_key(
+        orders,
+        ["order_id"],
+        "orders",
+    )
+
+    validate_unique_key(
+        order_items,
+        ["order_id", "order_item_id"],
+        "order_items",
+    )
+
+    validate_unique_key(
+        products,
         ["product_id"],
+        "products",
     )
 
-    validate_no_nulls(
-        "Payments",
-        datasets["payments"],
+    validate_unique_key(
+        payments,
         ["order_id", "payment_sequential"],
+        "payments",
     )
 
-    validate_no_nulls(
-        "Sellers",
-        datasets["sellers"],
+    validate_unique_key(
+        sellers,
         ["seller_id"],
+        "sellers",
     )
 
-    validate_no_nulls(
-        "Reviews",
-        datasets["reviews"],
+    validate_unique_key(
+        reviews,
         ["review_id", "order_id"],
-    )
-
-    validate_no_nulls(
-        "Geolocation",
-        datasets["geolocation"],
-        ["geolocation_zip_code_prefix"],
-    )
-
-
-# ---------------------------------------------------------------------------
-# Referential integrity
-# ---------------------------------------------------------------------------
-
-
-def validate_referential_integrity(
-    datasets: dict[str, pd.DataFrame],
-) -> None:
-    """Validate all critical cross-table foreign-key relationships."""
-
-    logger.info("Starting critical referential-integrity validation.")
-
-    # ------------------------------------------------------------------
-    # Orders -> Customers
-    # ------------------------------------------------------------------
-
-    validate_foreign_key(
-        child_name="orders",
-        child_df=datasets["orders"],
-        child_column="customer_id",
-        parent_name="customers",
-        parent_df=datasets["customers"],
-        parent_column="customer_id",
-    )
-
-    # ------------------------------------------------------------------
-    # Order Items -> Orders
-    # ------------------------------------------------------------------
-
-    validate_foreign_key(
-        child_name="order_items",
-        child_df=datasets["order_items"],
-        child_column="order_id",
-        parent_name="orders",
-        parent_df=datasets["orders"],
-        parent_column="order_id",
-    )
-
-    # ------------------------------------------------------------------
-    # Order Items -> Products
-    # ------------------------------------------------------------------
-
-    validate_foreign_key(
-        child_name="order_items",
-        child_df=datasets["order_items"],
-        child_column="product_id",
-        parent_name="products",
-        parent_df=datasets["products"],
-        parent_column="product_id",
-    )
-
-    # ------------------------------------------------------------------
-    # Order Items -> Sellers
-    # ------------------------------------------------------------------
-
-    validate_foreign_key(
-        child_name="order_items",
-        child_df=datasets["order_items"],
-        child_column="seller_id",
-        parent_name="sellers",
-        parent_df=datasets["sellers"],
-        parent_column="seller_id",
-    )
-
-    # ------------------------------------------------------------------
-    # Payments -> Orders
-    # ------------------------------------------------------------------
-
-    validate_foreign_key(
-        child_name="payments",
-        child_df=datasets["payments"],
-        child_column="order_id",
-        parent_name="orders",
-        parent_df=datasets["orders"],
-        parent_column="order_id",
-    )
-
-    # ------------------------------------------------------------------
-    # Reviews -> Orders
-    # ------------------------------------------------------------------
-
-    validate_foreign_key(
-        child_name="reviews",
-        child_df=datasets["reviews"],
-        child_column="order_id",
-        parent_name="orders",
-        parent_df=datasets["orders"],
-        parent_column="order_id",
+        "reviews",
     )
 
     logger.info(
-        "Critical referential-integrity validation passed."
+        "Review uniqueness model validated: "
+        "review_id alone is non-unique; "
+        "review_id + order_id is unique."
     )
 
+    # Foreign-key validation
+    validate_foreign_key(
+        orders,
+        "customer_id",
+        customers,
+        "customer_id",
+        "Orders → Customers",
+    )
 
-# ---------------------------------------------------------------------------
-# Geographic integrity
-# ---------------------------------------------------------------------------
+    validate_foreign_key(
+        order_items,
+        "order_id",
+        orders,
+        "order_id",
+        "Order Items → Orders",
+    )
 
+    validate_foreign_key(
+        order_items,
+        "product_id",
+        products,
+        "product_id",
+        "Order Items → Products",
+    )
 
-def validate_geographic_references(
-    datasets: dict[str, pd.DataFrame],
-) -> None:
-    """
-    Validate customer/seller ZIP-prefix relationships against geolocation.
+    validate_foreign_key(
+        order_items,
+        "seller_id",
+        sellers,
+        "seller_id",
+        "Order Items → Sellers",
+    )
 
-    Geographic relationships are warnings rather than hard failures because
-    the Olist source data can contain ZIP prefixes that are not represented
-    in the geolocation observation table.
-    """
+    validate_foreign_key(
+        payments,
+        "order_id",
+        orders,
+        "order_id",
+        "Payments → Orders",
+    )
 
+    validate_foreign_key(
+        reviews,
+        "order_id",
+        orders,
+        "order_id",
+        "Reviews → Orders",
+    )
+
+    # Customer → geolocation ZIP validation
+    customer_zip_coverage = validate_customer_zip_coverage(
+        customers,
+        geolocation,
+    )
+
+    # Order purchase timestamp validation
     logger.info(
-        "Starting geographic referential-integrity validation."
+        "Starting order purchase timestamp validation."
     )
 
-    geolocation = datasets["geolocation"]
-
-    # Geolocation contains multiple observations per ZIP prefix, so
-    # uniqueness of the ZIP prefix itself is NOT expected.
-    geolocation_zip_values = (
-        geolocation["geolocation_zip_code_prefix"]
-        .dropna()
-        .drop_duplicates()
+    orders["order_purchase_timestamp"] = pd.to_datetime(
+        orders["order_purchase_timestamp"],
+        errors="coerce",
     )
 
-    logger.info(
-        "Geolocation reference contains %s unique ZIP prefixes.",
-        f"{len(geolocation_zip_values):,}",
+    invalid_purchase_timestamps = (
+        orders["order_purchase_timestamp"].isna().sum()
     )
 
-    # Customers
-    if "customer_zip_code_prefix" in datasets["customers"].columns:
-        validate_optional_foreign_key(
-            child_name="customers",
-            child_df=datasets["customers"],
-            child_column="customer_zip_code_prefix",
-            parent_name="geolocation",
-            parent_df=geolocation,
-            parent_column="geolocation_zip_code_prefix",
-        )
-    else:
-        raise CrossTableValidationError(
-            "customers.csv does not contain "
-            "'customer_zip_code_prefix'."
-        )
-
-    # Sellers
-    if "seller_zip_code_prefix" in datasets["sellers"].columns:
-        validate_optional_foreign_key(
-            child_name="sellers",
-            child_df=datasets["sellers"],
-            child_column="seller_zip_code_prefix",
-            parent_name="geolocation",
-            parent_df=geolocation,
-            parent_column="geolocation_zip_code_prefix",
-        )
-    else:
-        raise CrossTableValidationError(
-            "sellers.csv does not contain "
-            "'seller_zip_code_prefix'."
+    if invalid_purchase_timestamps > 0:
+        raise ValueError(
+            "Orders contain "
+            f"{invalid_purchase_timestamps:,} invalid or NULL "
+            "order_purchase_timestamp values."
         )
 
     logger.info(
-        "Geographic referential-integrity validation completed."
+        "Order purchase timestamp validation passed."
     )
 
-
-# ---------------------------------------------------------------------------
-# Relationship profiling
-# ---------------------------------------------------------------------------
-
-
-def profile_relationships(
-    datasets: dict[str, pd.DataFrame],
-) -> None:
-    """Generate useful cross-table relationship statistics."""
-
-    orders = datasets["orders"]
-    order_items = datasets["order_items"]
-    payments = datasets["payments"]
-    reviews = datasets["reviews"]
-
-    logger.info("Starting cross-table relationship profiling.")
-
-    # Orders with order items
-    orders_with_items = order_items["order_id"].nunique()
-
+    # Customer signup_date validation
     logger.info(
-        "Orders represented in order_items: %s of %s.",
-        f"{orders_with_items:,}",
-        f"{orders['order_id'].nunique():,}",
+        "Starting customer signup_date temporal validation."
     )
 
-    # Orders with payments
-    orders_with_payments = payments["order_id"].nunique()
-
-    logger.info(
-        "Orders represented in payments: %s of %s.",
-        f"{orders_with_payments:,}",
-        f"{orders['order_id'].nunique():,}",
+    customers["signup_date"] = pd.to_datetime(
+        customers["signup_date"],
+        errors="coerce",
     )
 
-    # Orders with reviews
-    orders_with_reviews = reviews["order_id"].nunique()
+    null_signup_dates = customers["signup_date"].isna().sum()
+
+    if null_signup_dates > 0:
+        raise ValueError(
+            "Customers contain "
+            f"{null_signup_dates:,} NULL or invalid signup_date values."
+        )
 
     logger.info(
-        "Orders represented in reviews: %s of %s.",
-        f"{orders_with_reviews:,}",
-        f"{orders['order_id'].nunique():,}",
+        "Customer signup_date parsing validation passed."
     )
 
-    # Items per order
-    items_per_order = order_items.groupby("order_id").size()
-
-    logger.info(
-        "Maximum order items for one order: %s",
-        f"{items_per_order.max():,}",
+    expected_signup_dates = (
+        orders
+        .groupby("customer_id")["order_purchase_timestamp"]
+        .min()
+        .rename("expected_signup_date")
     )
 
-    logger.info(
-        "Average order items per order with items: %.2f",
-        items_per_order.mean(),
+    customer_signup_validation = customers[
+        ["customer_id", "signup_date"]
+    ].merge(
+        expected_signup_dates,
+        left_on="customer_id",
+        right_index=True,
+        how="left",
+        validate="one_to_one",
     )
 
-    # Payments per order
-    payments_per_order = payments.groupby("order_id").size()
+    customers_without_orders = (
+        customer_signup_validation["expected_signup_date"].isna()
+    ).sum()
+
+    customers_with_orders = (
+        ~customer_signup_validation["expected_signup_date"].isna()
+    ).sum()
 
     logger.info(
-        "Maximum payments for one order: %s",
-        f"{payments_per_order.max():,}",
+        "Customers without orders: %s",
+        f"{customers_without_orders:,}",
     )
 
     logger.info(
-        "Average payments per order with payments: %.2f",
-        payments_per_order.mean(),
+        "Customers with orders: %s",
+        f"{customers_with_orders:,}",
     )
 
-    # Reviews per order
-    reviews_per_order = reviews.groupby("order_id").size()
+    customers_with_orders_mask = (
+        customer_signup_validation["expected_signup_date"].notna()
+    )
+
+    signup_mismatches = (
+        customer_signup_validation.loc[
+            customers_with_orders_mask,
+            "signup_date",
+        ]
+        != customer_signup_validation.loc[
+            customers_with_orders_mask,
+            "expected_signup_date",
+        ]
+    ).sum()
+
+    if signup_mismatches > 0:
+        raise ValueError(
+            "Customer signup_date validation failed: "
+            f"{signup_mismatches:,} customers have a signup_date "
+            "different from their earliest order purchase timestamp."
+        )
 
     logger.info(
-        "Maximum reviews for one order: %s",
-        f"{reviews_per_order.max():,}",
+        "Customer signup_date derivation validation passed."
+    )
+
+    temporal_validation = orders[
+        ["customer_id", "order_purchase_timestamp"]
+    ].merge(
+        customers[["customer_id", "signup_date"]],
+        on="customer_id",
+        how="left",
+        validate="many_to_one",
+    )
+
+    invalid_temporal_records = (
+        temporal_validation["signup_date"]
+        > temporal_validation["order_purchase_timestamp"]
+    ).sum()
+
+    if invalid_temporal_records > 0:
+        raise ValueError(
+            "Customer temporal integrity validation failed: "
+            f"{invalid_temporal_records:,} orders have a purchase "
+            "timestamp earlier than the customer's signup_date."
+        )
+
+    logger.info(
+        "Customer temporal integrity validation passed."
+    )
+
+    # Geolocation structural validation
+    logger.info(
+        "Starting geolocation structural validation."
+    )
+
+    geolocation_lat = pd.to_numeric(
+        geolocation["geolocation_lat"],
+        errors="coerce",
+    )
+
+    geolocation_lng = pd.to_numeric(
+        geolocation["geolocation_lng"],
+        errors="coerce",
+    )
+
+    invalid_latitude = (
+        geolocation_lat.isna()
+        | ~geolocation_lat.between(-90, 90)
+    ).sum()
+
+    invalid_longitude = (
+        geolocation_lng.isna()
+        | ~geolocation_lng.between(-180, 180)
+    ).sum()
+
+    if invalid_latitude > 0:
+        raise ValueError(
+            f"Geolocation contains {invalid_latitude:,} "
+            "invalid latitude values."
+        )
+
+    if invalid_longitude > 0:
+        raise ValueError(
+            f"Geolocation contains {invalid_longitude:,} "
+            "invalid longitude values."
+        )
+
+    logger.info(
+        "Geolocation coordinate validation passed."
+    )
+
+    # Summary statistics
+    logger.info("=" * 60)
+    logger.info(
+        "Cross-table integrity validation completed successfully."
+    )
+    logger.info("=" * 60)
+
+    logger.info(
+        "Customers: %s",
+        f"{len(customers):,}",
     )
 
     logger.info(
-        "Orders with multiple reviews: %s",
-        f"{(reviews_per_order > 1).sum():,}",
+        "Orders: %s",
+        f"{len(orders):,}",
     )
 
     logger.info(
-        "Cross-table relationship profiling completed."
+        "Order items: %s",
+        f"{len(order_items):,}",
     )
-
-
-# ---------------------------------------------------------------------------
-# Main validation workflow
-# ---------------------------------------------------------------------------
-
-
-def main() -> None:
-    """Execute the complete cross-table validation pipeline."""
 
     logger.info(
-        "============================================================"
-    )
-    logger.info(
-        "Starting Olist cross-table integrity validation."
-    )
-    logger.info(
-        "============================================================"
+        "Products: %s",
+        f"{len(products):,}",
     )
 
+    logger.info(
+        "Payments: %s",
+        f"{len(payments):,}",
+    )
+
+    logger.info(
+        "Sellers: %s",
+        f"{len(sellers):,}",
+    )
+
+    logger.info(
+        "Reviews: %s",
+        f"{len(reviews):,}",
+    )
+
+    logger.info(
+        "Geolocation records: %s",
+        f"{len(geolocation):,}",
+    )
+
+    logger.info(
+        "Customer ZIP coverage: %.2f%%",
+        customer_zip_coverage,
+    )
+
+    logger.info(
+        "Customers with orders: %s",
+        f"{customers_with_orders:,}",
+    )
+
+    logger.info(
+        "Customers without orders: %s",
+        f"{customers_without_orders:,}",
+    )
+
+    logger.info(
+        "All referential integrity validations passed."
+    )
+
+    logger.info(
+        "All temporal integrity validations passed."
+    )
+
+    logger.info(
+        "All structural integrity validations passed."
+    )
+
+
+if __name__ == "__main__":
     try:
-        # --------------------------------------------------------------
-        # Load datasets
-        # --------------------------------------------------------------
-
-        datasets = {
-            name: load_dataset(name, path)
-            for name, path in FILES.items()
-        }
-
-        # --------------------------------------------------------------
-        # Required schema
-        # --------------------------------------------------------------
-
-        validate_required_columns(
-            "customers",
-            datasets["customers"],
-            [
-                "customer_id",
-                "customer_zip_code_prefix",
-            ],
-        )
-
-        validate_required_columns(
-            "orders",
-            datasets["orders"],
-            [
-                "order_id",
-                "customer_id",
-            ],
-        )
-
-        validate_required_columns(
-            "order_items",
-            datasets["order_items"],
-            [
-                "order_id",
-                "order_item_id",
-                "product_id",
-                "seller_id",
-            ],
-        )
-
-        validate_required_columns(
-            "products",
-            datasets["products"],
-            ["product_id"],
-        )
-
-        validate_required_columns(
-            "payments",
-            datasets["payments"],
-            [
-                "order_id",
-                "payment_sequential",
-            ],
-        )
-
-        validate_required_columns(
-            "sellers",
-            datasets["sellers"],
-            [
-                "seller_id",
-                "seller_zip_code_prefix",
-            ],
-        )
-
-        validate_required_columns(
-            "reviews",
-            datasets["reviews"],
-            [
-                "review_id",
-                "order_id",
-            ],
-        )
-
-        validate_required_columns(
-            "geolocation",
-            datasets["geolocation"],
-            [
-                "geolocation_zip_code_prefix",
-            ],
-        )
-
-        # --------------------------------------------------------------
-        # Row counts
-        # --------------------------------------------------------------
-
-        logger.info("Starting dataset row-count validation.")
-
-        for name, df in datasets.items():
-            validate_row_count(name, df)
-
-        # --------------------------------------------------------------
-        # Dataset-level keys
-        # --------------------------------------------------------------
-
-        validate_dataset_keys(datasets)
-
-        # --------------------------------------------------------------
-        # Key NULL validation
-        # --------------------------------------------------------------
-
-        validate_key_nulls(datasets)
-
-        # --------------------------------------------------------------
-        # Critical referential integrity
-        # --------------------------------------------------------------
-
-        validate_referential_integrity(datasets)
-
-        # --------------------------------------------------------------
-        # Geographic relationships
-        # --------------------------------------------------------------
-
-        validate_geographic_references(datasets)
-
-        # --------------------------------------------------------------
-        # Relationship profiling
-        # --------------------------------------------------------------
-
-        profile_relationships(datasets)
-
-        # --------------------------------------------------------------
-        # Success
-        # --------------------------------------------------------------
-
-        logger.info(
-            "============================================================"
-        )
-        logger.info(
-            "Cross-table integrity validation completed successfully."
-        )
-        logger.info(
-            "All critical referential-integrity checks passed."
-        )
-        logger.info(
-            "============================================================"
-        )
-
-    except CrossTableValidationError as exc:
-        logger.error(
+        main()
+    except Exception as exc:
+        logger.exception(
             "Cross-table integrity validation FAILED: %s",
             exc,
         )
         sys.exit(1)
-
-    except Exception:
-        logger.exception(
-            "Unexpected error during cross-table validation."
-        )
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
